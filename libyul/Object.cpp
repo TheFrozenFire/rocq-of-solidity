@@ -118,7 +118,14 @@ std::string Object::toRocq() const
 	std::string inner = "Definition code : Code.t := {|\n";
 	inner += "  Code.name := \"" + name + "\";\n";
 	std::string hex_name = util::toHex(util::asBytes(name));
-	inner += "  Code.hex_name := 0x" + hex_name + std::string(64 - hex_name.size(), '0') + ";\n";
+	// Pad to the next 32-byte (= 64 hex char) boundary. The prior version
+	// computed [64 - hex_name.size()] unconditionally, which underflows
+	// (size_t is unsigned) on names longer than 32 bytes — every Solidity
+	// contract whose name + Yul-side [_N_deployed] suffix exceeds 32 bytes
+	// crashed with [std::length_error] inside the std::string fill
+	// constructor.
+	size_t const padTo = ((hex_name.size() + 63) / 64) * 64;
+	inner += "  Code.hex_name := 0x" + hex_name + std::string(padTo - hex_name.size(), '0') + ";\n";
 	inner += "  Code.functions :=\n";
 	inner += prefixLines(AsmRocqConverter(*dialect(), 0).functions(code()->root()), "    ") + ";\n";
 	inner += "  Code.body :=\n";

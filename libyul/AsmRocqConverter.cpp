@@ -353,8 +353,17 @@ std::string AsmRocqConverter::rawLiteral(Literal const& _node) const
 	{
 		std::string hex = util::toHex(util::asBytes(value));
 
-		// Add a padding of zeros so that we always fit 32 bytes. The strings are in big-endian format.
-		return "Literal.string 0x" + hex + std::string(64 - hex.size(), '0') + "";
+		// Strings are emitted in big-endian 32-byte words. Pad the trailing
+		// word with zeros so the hex length is always a multiple of 64
+		// characters (= 32 bytes). The prior version computed [64 - hex.size()]
+		// unconditionally, which underflows on strings longer than 32 bytes
+		// (Yul-side string literals embedded by Solidity for longer constant
+		// expressions, e.g. inline error messages in OZ contracts) and triggers
+		// a [std::length_error] inside the std::string constructor when the
+		// underflowed size_t is passed as the fill count.
+		size_t const padTo = ((hex.size() + 63) / 64) * 64;
+		size_t const padding = padTo - hex.size();
+		return "Literal.string 0x" + hex + std::string(padding, '0');
 	}
 	default:
 		yulAssert(false, "Invalid literal kind");

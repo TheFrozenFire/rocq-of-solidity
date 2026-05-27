@@ -38,6 +38,8 @@
 
 #include <boost/algorithm/string/join.hpp>
 
+#include <boost/filesystem.hpp>
+
 #include <algorithm>
 #include <limits>
 #include <range/v3/view/map.hpp>
@@ -186,13 +188,13 @@ std::string ASTRocqExporter::inlineAssemblyIdentifierToRocq(
 	std::string tuple;
 	tuple += "src: " + sourceLocationToString(nativeLocationOf(*_info.first));
 	tuple += "declaration: " + idOrNull(_info.second.declaration);
-	tuple += "isSlot: " + (_info.second.suffix == "slot");
-	tuple += "isOffset: " + (_info.second.suffix == "offset");
+	tuple += "isSlot: "s + (_info.second.suffix == "slot" ? "true" : "false");
+	tuple += "isOffset: "s + (_info.second.suffix == "offset" ? "true" : "false");
 
 	if (!_info.second.suffix.empty())
 		tuple += "suffix: " + _info.second.suffix;
 
-	tuple += "valueSize: " + static_cast<Json::number_integer_t>(_info.second.valueSize);
+	tuple += "valueSize: " + std::to_string(static_cast<Json::number_integer_t>(_info.second.valueSize));
 
 	return tuple;
 }
@@ -304,9 +306,9 @@ bool ASTRocqExporter::visit(ImportDirective const& _node)
 	if (_node.annotation().absolutePath.set())
 	{
 		std::string absolutePath = *_node.annotation().absolutePath;
-		std::filesystem::path currentPath = std::filesystem::current_path();
-		std::filesystem::path testPath = currentPath / "..";
-		std::filesystem::path relativePath = std::filesystem::relative(absolutePath, testPath);
+		boost::filesystem::path currentPath = boost::filesystem::current_path();
+		boost::filesystem::path testPath = currentPath / "..";
+		boost::filesystem::path relativePath = boost::filesystem::relative(absolutePath, testPath);
 		std::string relativePathStr = relativePath.string();
 		// Replace '/' by '.'
 		std::replace(relativePathStr.begin(), relativePathStr.end(), '/', '.');

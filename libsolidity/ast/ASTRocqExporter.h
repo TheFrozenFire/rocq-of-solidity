@@ -194,7 +194,7 @@ private:
 
 		std::string output = "[";
 		for (int64_t val: tmp)
-			output += val + ",";
+			output += std::to_string(val) + ",";
 		return output + "]";
 	}
 	static std::string typePointerToRocq(Type const* _tp, bool _withoutDataLocation = false);
