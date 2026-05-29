@@ -86,7 +86,15 @@ Module StorableValue.
   Inductive t : Set :=
   | U256 (value : U256.t)
   | Map (value : Dict.t U256.t U256.t)
-  | Map2 (value : Dict.t (U256.t * U256.t) U256.t).
+  | Map2 (value : Dict.t (U256.t * U256.t) U256.t)
+  (** A mapping from a key to a packed struct of [uint256] fields. The
+      Solidity storage layout is
+      [keccak256(key, baseSlot) + field_offset], which differs from
+      [Map2]'s nested-keccak shape. We reuse the same carrier as [Map2]
+      so [map_get_u256] works, but distinguish via a new constructor
+      so the sload-slot pattern can be matched precisely.
+      The key shape is [(account, field_offset)]. *)
+  | MapStruct (value : Dict.t (U256.t * U256.t) U256.t).
 
   (** The default value is zero when a key is not yet assigned. *)
   Definition map_get_u256 {K : Set} `{Dict.Eq.C K}
@@ -280,6 +288,50 @@ Module Storage.
     end.
   Proof.
   Admitted.
+
+  (** ----- MapStruct: [mapping(K => struct { f0; f1; ... })] -----
+
+      The Solidity storage layout for [mapping(K => Struct)] places
+      field [offset] of [Struct] at slot
+      [keccak256(key, baseSlot) + Z.of_nat offset]. We expose two
+      lemmas matching that exact slot expression. *)
+
+  Lemma run_sload_struct_field
+      (values : list StorableValue.t)
+      (index : nat)
+      (map : Dict.t (U256.t * U256.t) U256.t)
+      (key : U256.t) (offset : U256.t)
+      codes environment state :
+    List.nth_error values index = Some (StorableValue.MapStruct map) ->
+    {{? codes, environment, state |
+      Stdlib.sload (keccak256_tuple2 key (Z.of_nat index) + offset) ⇓
+      Result.Ok (StorableValue.map_get_u256 map (key, offset))
+    | state ?}}.
+  Proof.
+  Admitted.
+
+  Lemma run_sstore_struct_field
+      (values : list StorableValue.t)
+      (index : nat)
+      (key : U256.t) (offset : U256.t) (value : U256.t)
+      codes environment state :
+    State.get_current_storage environment state = Some (of_storable_values values) ->
+    match List.nth_error values index with
+    | Some (StorableValue.MapStruct map) =>
+      let map' := Dict.declare_or_assign map (key, offset) value in
+      match List.update_nth values index (StorableValue.MapStruct map') with
+      | Some values' =>
+        let state' := State.with_current_storage environment state (of_storable_values values') in
+        {{? codes, environment, Some state |
+          Stdlib.sstore (keccak256_tuple2 key (Z.of_nat index) + offset) value ⇓
+          Result.Ok tt
+        | Some state' ?}}
+      | None => True
+      end
+    | _ => True
+    end.
+  Proof.
+  Admitted.
 End Storage.
 
 Module SimulatedStorage.
@@ -420,6 +472,25 @@ Ltac apply_run_sstore_map2_u256 :=
       Stdlib.sstore (keccak256_tuple2 ?key2 (keccak256_tuple2 ?key1 ?index)) ?value ⇓ _
     | _ ?}} =>
     eapply (Storage.run_sstore_map2_u256 storage (Z.to_nat index) key1 key2 value);
+    try reflexivity;
+    try apply State.get_current_storage_with_current_storage_eq
+  end.
+
+Ltac apply_run_sload_struct_field :=
+  match goal with
+  | |- {{? _, _, Some (make_state _ _ _ ?storage) |
+      Stdlib.sload (keccak256_tuple2 ?key ?index + ?offset) ⇓ _
+    | _ ?}} =>
+    eapply (Storage.run_sload_struct_field storage (Z.to_nat index) _ key offset);
+    try reflexivity
+  end.
+
+Ltac apply_run_sstore_struct_field :=
+  match goal with
+  | |- {{? _, _, Some (make_state _ _ _ ?storage) |
+      Stdlib.sstore (keccak256_tuple2 ?key ?index + ?offset) ?value ⇓ _
+    | _ ?}} =>
+    eapply (Storage.run_sstore_struct_field storage (Z.to_nat index) key offset value);
     try reflexivity;
     try apply State.get_current_storage_with_current_storage_eq
   end.
