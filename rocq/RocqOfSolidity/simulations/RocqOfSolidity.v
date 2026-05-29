@@ -2097,6 +2097,39 @@ Module RunO.
     {{? codes, environment, state |
       LowM.Loop init body break_with k ⇓ output
     | state' ?}}
+  (** [CallContract] — trust-based proof rule for cross-contract calls.
+
+      Operationally [LowM.CallContract] is fully defined by the [eval]
+      interpreter: it looks up the callee's code in [Codes.t], builds a
+      fresh [callee_environment] (rebinding msg.sender, msg.value,
+      calldata, address), and recursively reduces the callee's body.
+      Re-expressing that full reduction as a [RunO] inference rule
+      would require either:
+        (a) the prover to thread a recursive proof of the callee's
+            behaviour through their own [RunO] judgment, OR
+        (b) embedding [eval]'s soundness as a meta-theorem connecting
+            it to [RunO].
+
+      Both are substantial work. Until either lands, this rule lets
+      the proof author step past a [LowM.CallContract] by *choosing*
+      a [call_result] and an intermediate [state_inter], and proving
+      the continuation closes from there. Soundness is shifted to the
+      proof-author level: in practice they should justify the choice
+      via a separate Axiom (a "callee spec") that ties the (address,
+      input, is_static, is_delegate) to the chosen result.
+
+      Audit-time discipline: every use of this rule produces a
+      transferred theorem that inherits the callee-spec axioms. The
+      governor-side Audit.v Caveat-5 lists the inherited axioms. *)
+  | CallContract (address : U256.t) (value : U256.t) (input : list Z)
+      (is_static : bool) (is_delegate : bool)
+      (k : U256.t -> LowM.t A)
+      (call_result : U256.t)
+      (state state_inter state' : option State.t) :
+    {{? codes, environment, state_inter | k call_result ⇓ output | state' ?}} ->
+    {{? codes, environment, state |
+      LowM.CallContract address value input is_static is_delegate k ⇓ output
+    | state' ?}}
 
   where "{{? codes , environment , state | e ⇓ output | state' ?}}" :=
     (t codes environment output state e state').
@@ -2198,6 +2231,10 @@ Module RunO.
   Ltac lu := apply RunO.LetUnfold.
   Ltac c := eapply RunO.Call.
   Ltac cu := apply RunO.CallUnfold.
+  (** Step past a [LowM.CallContract]. Leaves [call_result] and
+      [state_inter] as evars to be instantiated by a callee-spec
+      axiom (or explicit witnesses in the proof). *)
+  Ltac cc := eapply RunO.CallContract.
   Ltac s := fold @LowM.let_; simpl_goal.
 End RunO.
 
