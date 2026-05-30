@@ -251,7 +251,7 @@ def statement_to_rocq(node) -> tuple[Callable[[set[str]], str], set[str], set[st
         return (
             lambda final_updated_vars:
                 "let_state~ " + \
-                updated_vars_to_rocq(True, final_updated_vars) + \
+                updated_vars_to_rocq(True, commonly_updated_vars) + \
                 " := [[\n" + \
                 indent(
                     "(* switch *)\n" + \
