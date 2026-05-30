@@ -1222,6 +1222,20 @@ Module Stdlib.
   Definition setimmutable (_offset name value : U256.t) : M.t unit :=
     LowM.Primitive (Primitive.SetImmutable name value) M.pure.
 
+  (** [linkersymbol] is the Yul primitive that solc emits for every
+      external library reference (e.g. ``linkersymbol("MyLib.sol:Lib")``
+      in a contract that calls a Solidity ``library``).  At deployment
+      time the linker substitutes a real library address for the symbol;
+      from the contract's point of view it's an opaque ``U256.t``.  For
+      proof purposes we model it as identity on the name argument — the
+      address vs. name distinction doesn't matter for the contract's
+      own equivalence proof because every use of the returned value
+      flows through the same opaque path.  Adding a dedicated
+      [Primitive.LinkerSymbol] constructor would be more faithful but
+      isn't required for current proof targets. *)
+  Definition linkersymbol (name : U256.t) : M.t U256.t :=
+    M.pure name.
+
   (** ** Additional functions for the object mode of Yul. *)
   (** We assume that the optimizer does not use any additional memory. *)
   Definition memoryguard (size : U256.t) : M.t U256.t :=
