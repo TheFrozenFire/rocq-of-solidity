@@ -1,3 +1,52 @@
+"""Generate the shallow-embedded Rocq form of a Yul AST.
+
+Layering invariant
+------------------
+``Shallow.*`` control-flow constructs (``Shallow.if_``, ``Shallow.for_``,
+``Shallow.let_state`` via ``let_state~``) are emitted OUTSIDE
+``[[ ]]`` brackets.  Brackets only wrap individual subterms that
+need ``M.monadic`` to bridge ``M.run`` markers into the ``M.t`` monad
+— conditions, discriminants, the RHS of ``let~``, the body of
+``do~``.  Never an enclosing ``Shallow.*`` constructor.
+
+Why this matters
+----------------
+``[[ e ]]`` expands to ``ltac:(M.monadic e)``.  ``M.monadic`` knows
+about Coq's primitive ``let``, the ``M.run`` marker, and a default
+that ``exact``s a typed lift.  It does NOT know about the
+``Shallow.*`` DSL.  When ``Shallow.let_state`` lives inside ``[[ ]]``,
+``M.monadic``'s ``context [run ?x]`` matcher can reach inside the
+``Shallow.let_state`` lambda body, but the lambda's own binder
+isn't yet in the proof context at rewrite time — so any reference
+to names bound by surrounding ``let~`` chains surfaces as an
+unbound metavariable: ``Must evaluate to a closed term, offending
+expression: e``.  See ``WISDOM R041``.
+
+The bridge: pure-vs-monadic typing
+----------------------------------
+``Shallow.if_``'s condition slot is ``U256.t`` (pure); ``[[ e ]]``
+always elaborates to ``M.t _``.  The simple "drop the outer
+brackets" fix would mistype every effectful condition.  The
+correct shape pre-binds the condition via ``let~``:
+
+    let_state~ outer :=
+      let~ _condition := [[ original_condition ]] in
+      Shallow.if_ (| _condition, then_body, fallback |)
+    default~ ... in
+
+``M.strong_let_`` evaluates ``[[ condition ]]`` (handling M.run
+markers), binds the resulting ``U256.t`` value to ``_condition``,
+then hands it to ``Shallow.if_`` directly.  Body and fallback live
+outside any bracket entirely, so any nested ``let_state~`` they
+contain is never seen by an outer ``M.monadic``.
+
+``Shallow.for_`` is an outlier: its condition slot is
+``State -> M.t U256.t`` (monadic), so it accepts ``[[ ]]`` output
+directly.  No pre-bind needed.  ``YulSwitch`` already pre-binds
+the discriminant via ``let~ δ`` inside the outer brackets, so only
+the outer brackets need to drop for the invariant to hold.
+"""
+
 from collections import defaultdict
 import json
 from pathlib import Path
@@ -213,21 +262,33 @@ def statement_to_rocq(node) -> tuple[Callable[[set[str]], str], set[str], set[st
         )
 
     elif node_type == 'YulIf':
+        # CPS pre-bind: keep Shallow.if_ outside [[ ]] so nested let_state~
+        # in the body doesn't fall under M.monadic's traversal (WISDOM R041).
+        # Two adjustments vs the original wrap-everything-in-brackets shape:
+        #   1. Pre-bind the condition via `let~` so Shallow.if_'s pure
+        #      `U256.t` slot receives a pure value (not the `M.t U256.t`
+        #      that `[[ ]]` would produce).
+        #   2. Call `Shallow.if_` via direct function application
+        #      (`Shallow.if_ cond success failure`) — NOT the `(| |)`
+        #      notation, which expands to `M.run (Shallow.if_ ...)` and
+        #      strips the monad off the result, but `let_state~`'s
+        #      first arg needs to be `M.t (BlockUnit.t * State)`.
+        #      YulForLoop already uses direct application for Shallow.for_.
+        # Body and fallback live outside any [[ ]] entirely.
         condition = expression_to_rocq(node.get('condition'))
         then_body, then_updated_vars = block_to_rocq(None, node.get('body'))
         return (
             lambda final_updated_vars:
                 "let_state~ " + \
                 updated_vars_to_rocq(True, then_updated_vars) + \
-                " := [[\n" + \
+                " :=\n" + \
                 indent(
-                    "Shallow.if_ (|\n" +
-                    indent(condition) + ",\n" +
-                    indent(then_body) + ",\n" +
-                    indent(updated_vars_to_rocq(False, then_updated_vars)) + "\n" +
-                    "|)"
+                    "let~ γ_cond := [[ " + condition + " ]] in\n" +
+                    "Shallow.if_ γ_cond\n" +
+                    indent("(" + then_body + ")") + "\n" +
+                    indent(updated_vars_to_rocq(False, then_updated_vars))
                 ) + "\n" + \
-                "]] default~ " + updated_vars_to_rocq(False, final_updated_vars) + " in",
+                "default~ " + updated_vars_to_rocq(False, final_updated_vars) + " in",
             set(),
             then_updated_vars,
         )
@@ -248,11 +309,18 @@ def statement_to_rocq(node) -> tuple[Callable[[set[str]], str], set[str], set[st
             for _, (_, updated_vars) in cases
             for name in updated_vars
         }
+        # YulSwitch already pre-binds the discriminant via `let~ δ`, so its
+        # if-then-else chain runs on a pure `δ : U256.t`.  The only fix
+        # needed (vs YulIf) is dropping the OUTER `[[ ]]` so nested
+        # `let_state~` in case bodies stays outside M.monadic's window
+        # (WISDOM R041).  The inner `let~ δ := [[ expression ]]` brackets
+        # remain — that's exactly the kind of single-expression monadic
+        # lift `[[ ]]` is designed for.
         return (
             lambda final_updated_vars:
                 "let_state~ " + \
                 updated_vars_to_rocq(True, commonly_updated_vars) + \
-                " := [[\n" + \
+                " :=\n" + \
                 indent(
                     "(* switch *)\n" + \
                     f"let~ δ := [[ {expression} ]] in\n" + \
@@ -271,7 +339,7 @@ def statement_to_rocq(node) -> tuple[Callable[[set[str]], str], set[str], set[st
                         updated_vars_to_rocq(False, commonly_updated_vars) + ")"
                     )
                 ) + "\n" + \
-                "]] default~ " + updated_vars_to_rocq(False, final_updated_vars) + " in",
+                "default~ " + updated_vars_to_rocq(False, final_updated_vars) + " in",
             set(),
             commonly_updated_vars,
         )
