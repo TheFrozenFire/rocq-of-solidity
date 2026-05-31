@@ -234,20 +234,41 @@ def statement_to_rocq(node) -> tuple[Callable[[set[str]], str], set[str], set[st
 
     elif node_type == 'YulSwitch':
         expression = expression_to_rocq(node.get('expression'))
-        cases = [
-            (
-                expression_to_rocq(case.get('value')),
-                block_to_rocq(None, case.get('body')),
-            )
-            for case in node.get('cases', [])
-            # TODO: handle the default case in a switch
-            if case.get('value') != "default"
-        ]
+        # Separate the optional default case from the value-matching cases.
+        # A Yul switch's default is { "value": "default", "body": <YulBlock> };
+        # value cases carry a YulLiteral in .value. Without this split the
+        # default body is silently dropped — e.g. OZ's `_grantRole` puts the
+        # entire sstore + `var := 1` sequence in the default arm, which
+        # otherwise vanishes from the shallow form (R046).
+        value_cases = []
+        default_case = None  # tuple (body, updated_vars) or None
+        for case in node.get('cases', []):
+            if case.get('value') == "default":
+                default_case = block_to_rocq(None, case.get('body'))
+            else:
+                value_cases.append((
+                    expression_to_rocq(case.get('value')),
+                    block_to_rocq(None, case.get('body')),
+                ))
         commonly_updated_vars: set[str] = {
             name
-            for _, (_, updated_vars) in cases
+            for _, updated_vars in (
+                [(b, uv) for _, (b, uv) in value_cases]
+                + ([default_case] if default_case is not None else [])
+            )
             for name in updated_vars
         }
+        if default_case is not None:
+            default_body, default_updated_vars = default_case
+            else_branch = lift_state_update(
+                default_body,
+                default_updated_vars,
+                commonly_updated_vars,
+            )
+        else:
+            else_branch = \
+                "M.pure (BlockUnit.Tt, " + \
+                updated_vars_to_rocq(False, commonly_updated_vars) + ")"
         return (
             lambda final_updated_vars:
                 "let_state~ " + \
@@ -263,13 +284,10 @@ def statement_to_rocq(node) -> tuple[Callable[[set[str]], str], set[str], set[st
                             updated_vars,
                             commonly_updated_vars,
                         ))
-                        for value, (body, updated_vars) in cases
+                        for value, (body, updated_vars) in value_cases
                     ) + "\n" + \
                     "else\n" + \
-                    indent(
-                        "M.pure (BlockUnit.Tt, " + \
-                        updated_vars_to_rocq(False, commonly_updated_vars) + ")"
-                    )
+                    indent(else_branch)
                 ) + "\n" + \
                 "]] default~ " + updated_vars_to_rocq(False, final_updated_vars) + " in",
             set(),
