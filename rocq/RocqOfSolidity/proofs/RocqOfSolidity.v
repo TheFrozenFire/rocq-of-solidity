@@ -178,6 +178,36 @@ Lemma run_keccak256_tuple2 codes environment state
 Proof.
 Admitted.
 
+(** ----- Single-word keccak -----
+
+    Solidity's [EnumerableSet] (and any dynamic-array layout that
+    derives its data slot from the array's anchor) lowers to
+    [mstore(0, anchor); keccak256(0, 0x20)] -- a SINGLE-input keccak.
+    [run_keccak256_single] is the proof-side counterpart to
+    [keccak256_single] in [simulations/RocqOfSolidity.v]: given a
+    memory layout where word [index] holds [a], stepping
+    [Stdlib.keccak256 (32 * index) 32] produces [keccak256_single a].
+
+    The slot-expression shape that consumes the result is
+    [keccak256_single anchor + offset]; sload / sstore axioms at that
+    shape are written downstream of this primitive (they are not
+    one-size-fits-all because the storage projection a caller uses
+    for the array body varies -- direct [Dict.t U256.t U256.t] keyed
+    by offset, or [Dict.t (U256.t * U256.t) U256.t] keyed by
+    [(anchor, offset)], or a per-caller bridge to a multi-role
+    [Map2]). Callers add the matching sload/sstore axiom alongside
+    their per-contract storage projection. *)
+Lemma run_keccak256_single codes environment state
+    (memory : list U256.t) (index : nat) (a : U256.t) :
+  state.(State.memory) = Memory.of_u256_list memory ->
+  List.nth_error memory index = Some a ->
+  {{? codes, environment, Some state |
+    Stdlib.keccak256 (32 * (Z.of_nat index)) 32 ⇓
+    Result.Ok (keccak256_single a)
+  | Some state ?}}.
+Proof.
+Admitted.
+
 Module Storage.
   Definition of_storable_values (values : list StorableValue.t) : Storage.t.
   Admitted.
@@ -499,6 +529,14 @@ Ltac apply_run_keccak256_tuple2 :=
   match goal with
   | |- {{? _, _, Some (make_state _ _ ?memory _) | Stdlib.keccak256 ?pointer 64 ⇓ _ | _ ?}} =>
     apply (run_keccak256_tuple2 _ _ _ memory (Z.to_nat (pointer / 32)));
+    try reflexivity;
+    try apply get_memory_make_state_eq
+  end.
+
+Ltac apply_run_keccak256_single :=
+  match goal with
+  | |- {{? _, _, Some (make_state _ _ ?memory _) | Stdlib.keccak256 ?pointer 32 ⇓ _ | _ ?}} =>
+    apply (run_keccak256_single _ _ _ memory (Z.to_nat (pointer / 32)));
     try reflexivity;
     try apply get_memory_make_state_eq
   end.

@@ -2955,3 +2955,18 @@ Definition wrap_state_with_revert {A : Set} (state : State.t) (output : Result.t
 
 (** Useful to write some simulation. We should give it an explicit value. *)
 Parameter keccak256_tuple2 : U256.t -> U256.t -> U256.t.
+
+(** Single-word keccak primitive — companion to [keccak256_tuple2].
+
+    Solidity's [EnumerableSet] (and any other ABI shape that hashes a
+    single 32-byte storage anchor to derive a dynamic array's data
+    region) lowers to the Yul sequence [mstore(0, slot); keccak256(0,
+    0x20)]. The result is [keccak256(set_slot)] — a single-input
+    keccak, distinct from [keccak256_tuple2 key idx] which takes two
+    32-byte words.
+
+    Kept as a [Parameter] for the same reason as [keccak256_tuple2]:
+    sim-level proofs do not depend on its concrete value, only on its
+    abstract identity (the witness is provided by the underlying
+    keccak implementation used at extraction time). *)
+Parameter keccak256_single : U256.t -> U256.t.
