@@ -397,45 +397,69 @@ Module M.
 
   (** A tactic that replaces all [run] markers with a bind operation.
       This allows to represent Rust programs without introducing
-      explicit names for all intermediate computation results. *)
+      explicit names for all intermediate computation results.
+
+      Guard rail: before doing anything else we check that [e] is a
+      typeable Coq term.  When [[ e ]] wraps an expression that
+      contains an unresolved identifier — a missing primitive
+      Definition, a misspelled function name, a forward reference —
+      [type of e] fails and Coq surfaces the failure as the unhelpful
+      [Must evaluate to a closed term, offending expression: e, this
+      is an object of type ident] message.  That message catches
+      every kind of unresolved-identifier error with the same shape,
+      and the diagnostic cost is significant (see WISDOM R041 — the
+      missing [linkersymbol] primitive looked indistinguishable from
+      a deep Ltac defect for hours).  Replacing the opaque failure
+      with a clear [fail] gives the next reader a fighting chance. *)
   Ltac monadic e :=
-    lazymatch e with
-    | context ctxt [let v := ?x in @?f v] =>
-      refine (let_ _ _);
-        [ monadic x
-        | let v' := fresh v in
-          intro v';
-          let y := (eval cbn beta in (f v')) in
-          lazymatch context ctxt [let v := x in y] with
-          | let _ := x in y => monadic y
-          | _ =>
-            refine (let_ _ _);
-              [ monadic y
-              | let w := fresh "v" in
-                intro w;
-                let z := context ctxt [w] in
-                monadic z
-              ]
-          end
-        ]
-    | context ctxt [run ?x] =>
-      lazymatch context ctxt [run x] with
-      | run x => monadic x
-      | _ =>
+    tryif (let _ := type of e in idtac) then
+      lazymatch e with
+      | context ctxt [let v := ?x in @?f v] =>
         refine (let_ _ _);
           [ monadic x
-          | let v := fresh "v" in
-            intro v;
-            let y := context ctxt [v] in
-            monadic y
+          | let v' := fresh v in
+            intro v';
+            let y := (eval cbn beta in (f v')) in
+            lazymatch context ctxt [let v := x in y] with
+            | let _ := x in y => monadic y
+            | _ =>
+              refine (let_ _ _);
+                [ monadic y
+                | let w := fresh "v" in
+                  intro w;
+                  let z := context ctxt [w] in
+                  monadic z
+                ]
+            end
           ]
+      | context ctxt [run ?x] =>
+        lazymatch context ctxt [run x] with
+        | run x => monadic x
+        | _ =>
+          refine (let_ _ _);
+            [ monadic x
+            | let v := fresh "v" in
+              intro v;
+              let y := context ctxt [v] in
+              monadic y
+            ]
+        end
+      | _ =>
+        lazymatch type of e with
+        | t _ => exact e
+        | _ => exact (pure e)
+        end
       end
-    | _ =>
-      lazymatch type of e with
-      | t _ => exact e
-      | _ => exact (pure e)
-      end
-    end.
+    else
+      fail 100
+        "M.monadic: the expression inside [[ ... ]] cannot be type-"
+        "checked.  Most likely cause: an identifier used inside the "
+        "brackets has no Definition in scope.  Common cases: (1) a "
+        "missing Require Import for a Module that defines the "
+        "identifier; (2) a Yul primitive that rocq-of-solidity "
+        "doesn't yet model — add it next to loadimmutable / "
+        "memoryguard in simulations/RocqOfSolidity.v.  See "
+        "WISDOM R041 for the linkersymbol case study.".
 End M.
 
 (* TODO: move this module in a separated file? *)
