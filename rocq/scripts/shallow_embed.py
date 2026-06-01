@@ -19,10 +19,50 @@ def paren(condition: bool, value: str) -> str:
 
 
 def name_to_rocq(name: str) -> str:
+    # Rocq reserved tokens that can collide with names solc emits inside
+    # Yul AST as Yul identifiers / function parameters. Notable cases:
+    #
+    #   - `end`, `mod`, `return` — historically tracked; `mod` is emitted
+    #     by solc as a Yul builtin function name, `return` likewise, and
+    #     `end` shows up in some library names.
+    #   - `fun`            — solc emits `function dispatch_internal_in_N_out_M(fun, ...)`
+    #                        for internal-function-pointer dispatch. The
+    #                        first parameter literally is `fun`. Without
+    #                        the rename, the Rocq output is
+    #                        `Definition ... (fun : U256.t) ...` which is
+    #                        a syntax error since `fun` is Rocq's lambda
+    #                        keyword. Manifests on StakingVault and any
+    #                        contract that takes an `function ... internal`
+    #                        as a callback (R073).
+    #   - The rest are defensive: any of these as a Yul identifier would
+    #     produce ungrammatical Rocq. They are not known to appear in
+    #     practice but cost nothing to guard against.
     reserved_names = [
+        "as",
+        "at",
+        "by",
+        "case",
+        "cofix",
+        "do",
+        "else",
         "end",
+        "exists",
+        "fix",
+        "for",
+        "forall",
+        "fun",
+        "if",
+        "in",
+        "let",
+        "match",
         "mod",
+        "of",
         "return",
+        "struct",
+        "then",
+        "using",
+        "where",
+        "with",
     ]
 
     if name in reserved_names:
@@ -176,10 +216,25 @@ def statement_to_rocq(node) -> tuple[Callable[[set[str]], str], set[str], set[st
     elif node_type == 'YulVariableDeclaration':
         variable_names = node.get('variables', [])
         variables = variable_names_to_rocq(True, variable_names)
-        value = \
-            expression_to_rocq(node.get('value')) \
-            if node.get('value') is not None \
-            else "0"
+        # When there is no initializer (`let a, b, c, d`), Yul implicitly
+        # zero-initializes every declared slot. The shallow form must
+        # match the binder arity: a single binder takes `0`, but an
+        # N-tuple binder needs `(0, 0, ..., 0)` so Rocq sees a `prod`
+        # constructor, not a `Z`. Without this fan-out, a declaration
+        # like `let a, b, c, d` emits
+        #     let~ '(a, b, c, d) := [[ 0 ]] in
+        # which fails with
+        #     Found a constructor of inductive type prod while a
+        #     constructor of Z is expected.
+        # Manifests on StakingVault (Yul lowering of
+        # `(bytes32, string memory, address, bool)` external-call
+        # returns into a 4-tuple destructuring) — R074.
+        if node.get('value') is not None:
+            value = expression_to_rocq(node.get('value'))
+        elif len(variable_names) <= 1:
+            value = "0"
+        else:
+            value = "(" + ", ".join(["0"] * len(variable_names)) + ")"
         return (
             lambda _:
                 f"let~ {variables} := [[ {value} ]] in",
