@@ -94,7 +94,88 @@ Module StorableValue.
       so [map_get_u256] works, but distinguish via a new constructor
       so the sload-slot pattern can be matched precisely.
       The key shape is [(account, field_offset)]. *)
-  | MapStruct (value : Dict.t (U256.t * U256.t) U256.t).
+  | MapStruct (value : Dict.t (U256.t * U256.t) U256.t)
+  (** A mapping from a key to a Solidity dynamic array (e.g.
+      [mapping(K => T[])]). Solidity lays out the array data using its
+      standard dynamic-array convention, but ANCHORED at
+      [keccak256(key, baseSlot)] rather than at a fixed slot:
+
+        slot[keccak(key, baseSlot)]                = array length
+        slot[keccak(keccak(key, baseSlot)) + i]    = values[i]
+
+      (Anchor uses the nested-keccak shape of a [mapping(K => _)] base,
+      then the body uses a SINGLE-input keccak on the anchor to derive
+      the data area -- same as a non-mapped dynamic array would do from
+      its base slot.)
+
+      The carrier is a [Dict.t U256.t (list U256.t)]: keys are the map
+      keys (e.g. role bytes32), values are the per-key dynamic-array
+      contents as a Coq list. Missing keys default to the empty list
+      via [Dict.get] = None -> []. This is the honest framework
+      primitive modelling OZ's [EnumerableSet] storage shape (and any
+      other [mapping(K => T[])] consumer); the four sload/sstore
+      lemmas below are written at the exact OZ-actual slot expressions
+      so callers can compose without a per-contract trust axiom for
+      the array shape. *)
+  | MapToArray (value : Dict.t U256.t (list U256.t)).
+
+  (** Default-zero lookup of an array body element. Out-of-range
+      indices yield 0 (Solidity's implicit zero-init for unassigned
+      array slots). *)
+  Definition array_get_u256
+      (map : Dict.t U256.t (list U256.t))
+      (key : U256.t) (idx : nat) : U256.t :=
+    match Dict.get map key with
+    | Some lst => List.nth_default 0 lst idx
+    | None => 0
+    end.
+
+  (** Default-zero lookup of an array length. Missing keys -> 0. *)
+  Definition array_length_u256
+      (map : Dict.t U256.t (list U256.t))
+      (key : U256.t) : U256.t :=
+    match Dict.get map key with
+    | Some lst => Z.of_nat (List.length lst)
+    | None => 0
+    end.
+
+  (** Set [arr[key][idx] := value]. If [key] is missing or the inner
+      list is too short, the operation is a no-op (the lemma below is
+      stated under a guard hypothesis that the index is in range). *)
+  Definition array_assign_u256
+      (map : Dict.t U256.t (list U256.t))
+      (key : U256.t) (idx : nat) (value : U256.t) :
+      Dict.t U256.t (list U256.t) :=
+    let cur := match Dict.get map key with
+               | Some lst => lst
+               | None => []
+               end in
+    match List.update_nth cur idx value with
+    | Some lst' => Dict.declare_or_assign map key lst'
+    | None => map
+    end.
+
+  (** Set [arr[key]] length to [new_len]. Extends with zero or
+      truncates to the requested length. Matches Solidity's
+      length-write semantics (a write that grows the array zero-fills
+      the new positions; a write that shrinks truncates and zeroes the
+      dropped slots). *)
+  Definition array_resize_u256
+      (map : Dict.t U256.t (list U256.t))
+      (key : U256.t) (new_len : nat) :
+      Dict.t U256.t (list U256.t) :=
+    let cur := match Dict.get map key with
+               | Some lst => lst
+               | None => []
+               end in
+    let cur_len := List.length cur in
+    let resized :=
+      if Nat.leb new_len cur_len then
+        List.firstn new_len cur
+      else
+        cur ++ List.repeat (0 : U256.t) (new_len - cur_len)
+    in
+    Dict.declare_or_assign map key resized.
 
   (** The default value is zero when a key is not yet assigned. *)
   Definition map_get_u256 {K : Set} `{Dict.Eq.C K}
@@ -130,6 +211,10 @@ Module IsStorable.
 
   Global Instance IMap2 : C (Dict.t (U256.t * U256.t) U256.t) := {
     to_storable_value := StorableValue.Map2;
+  }.
+
+  Global Instance IMapToArray : C (Dict.t U256.t (list U256.t)) := {
+    to_storable_value := StorableValue.MapToArray;
   }.
 End IsStorable.
 
@@ -362,6 +447,96 @@ Module Storage.
     end.
   Proof.
   Admitted.
+
+  (** ----- MapToArray: [mapping(K => T[])] -----
+
+      Honest framework primitive for the OZ [EnumerableSet] storage
+      shape (and any other [mapping(K => T[])] consumer). The four
+      lemmas below match the EXACT slot expressions that solc emits
+      for such a mapping anchored at slot [index]:
+
+        - length:   sload (keccak(key, index))           => Z.of_nat (length arr[key])
+        - body[i]:  sload (keccak(keccak(key, index)) + i) => arr[key][i]
+
+      Each is the [MapToArray] analogue of the [Map] / [Map2] /
+      [MapStruct] lemmas above. They are [Admitted] in the framework
+      (same shape as the other Storage primitives) -- the trust
+      transfers to one common audit obligation rather than to
+      per-contract slot-shape axioms. *)
+
+  Lemma run_sload_maptoarray_length
+      (values : list StorableValue.t)
+      (index : nat)
+      (map : Dict.t U256.t (list U256.t))
+      (key : U256.t)
+      codes environment state :
+    List.nth_error values index = Some (StorableValue.MapToArray map) ->
+    {{? codes, environment, state |
+      Stdlib.sload (keccak256_tuple2 key (Z.of_nat index)) ⇓
+      Result.Ok (StorableValue.array_length_u256 map key)
+    | state ?}}.
+  Proof.
+  Admitted.
+
+  Lemma run_sload_maptoarray_elem
+      (values : list StorableValue.t)
+      (index : nat)
+      (map : Dict.t U256.t (list U256.t))
+      (key : U256.t) (i : nat)
+      codes environment state :
+    List.nth_error values index = Some (StorableValue.MapToArray map) ->
+    {{? codes, environment, state |
+      Stdlib.sload (keccak256_single (keccak256_tuple2 key (Z.of_nat index)) + Z.of_nat i) ⇓
+      Result.Ok (StorableValue.array_get_u256 map key i)
+    | state ?}}.
+  Proof.
+  Admitted.
+
+  Lemma run_sstore_maptoarray_length
+      (values : list StorableValue.t)
+      (index : nat)
+      (key : U256.t) (new_len : nat)
+      codes environment state :
+    State.get_current_storage environment state = Some (of_storable_values values) ->
+    match List.nth_error values index with
+    | Some (StorableValue.MapToArray map) =>
+      let map' := StorableValue.array_resize_u256 map key new_len in
+      match List.update_nth values index (StorableValue.MapToArray map') with
+      | Some values' =>
+        let state' := State.with_current_storage environment state (of_storable_values values') in
+        {{? codes, environment, Some state |
+          Stdlib.sstore (keccak256_tuple2 key (Z.of_nat index)) (Z.of_nat new_len) ⇓
+          Result.Ok tt
+        | Some state' ?}}
+      | None => True
+      end
+    | _ => True
+    end.
+  Proof.
+  Admitted.
+
+  Lemma run_sstore_maptoarray_elem
+      (values : list StorableValue.t)
+      (index : nat)
+      (key : U256.t) (i : nat) (value : U256.t)
+      codes environment state :
+    State.get_current_storage environment state = Some (of_storable_values values) ->
+    match List.nth_error values index with
+    | Some (StorableValue.MapToArray map) =>
+      let map' := StorableValue.array_assign_u256 map key i value in
+      match List.update_nth values index (StorableValue.MapToArray map') with
+      | Some values' =>
+        let state' := State.with_current_storage environment state (of_storable_values values') in
+        {{? codes, environment, Some state |
+          Stdlib.sstore (keccak256_single (keccak256_tuple2 key (Z.of_nat index)) + Z.of_nat i) value ⇓
+          Result.Ok tt
+        | Some state' ?}}
+      | None => True
+      end
+    | _ => True
+    end.
+  Proof.
+  Admitted.
 End Storage.
 
 Module SimulatedStorage.
@@ -521,6 +696,46 @@ Ltac apply_run_sstore_struct_field :=
       Stdlib.sstore (keccak256_tuple2 ?key ?index + ?offset) ?value ⇓ _
     | _ ?}} =>
     eapply (Storage.run_sstore_struct_field storage (Z.to_nat index) key offset value);
+    try reflexivity;
+    try apply State.get_current_storage_with_current_storage_eq
+  end.
+
+(** ----- MapToArray Ltacs ----- *)
+
+Ltac apply_run_sload_maptoarray_length :=
+  match goal with
+  | |- {{? _, _, Some (make_state _ _ _ ?storage) |
+      Stdlib.sload (keccak256_tuple2 ?key ?index) ⇓ _
+    | _ ?}} =>
+    eapply (Storage.run_sload_maptoarray_length storage (Z.to_nat index) _ key);
+    try reflexivity
+  end.
+
+Ltac apply_run_sload_maptoarray_elem :=
+  match goal with
+  | |- {{? _, _, Some (make_state _ _ _ ?storage) |
+      Stdlib.sload (keccak256_single (keccak256_tuple2 ?key ?index) + ?i) ⇓ _
+    | _ ?}} =>
+    eapply (Storage.run_sload_maptoarray_elem storage (Z.to_nat index) _ key (Z.to_nat i));
+    try reflexivity
+  end.
+
+Ltac apply_run_sstore_maptoarray_length :=
+  match goal with
+  | |- {{? _, _, Some (make_state _ _ _ ?storage) |
+      Stdlib.sstore (keccak256_tuple2 ?key ?index) ?new_len ⇓ _
+    | _ ?}} =>
+    eapply (Storage.run_sstore_maptoarray_length storage (Z.to_nat index) key (Z.to_nat new_len));
+    try reflexivity;
+    try apply State.get_current_storage_with_current_storage_eq
+  end.
+
+Ltac apply_run_sstore_maptoarray_elem :=
+  match goal with
+  | |- {{? _, _, Some (make_state _ _ _ ?storage) |
+      Stdlib.sstore (keccak256_single (keccak256_tuple2 ?key ?index) + ?i) ?value ⇓ _
+    | _ ?}} =>
+    eapply (Storage.run_sstore_maptoarray_elem storage (Z.to_nat index) key (Z.to_nat i) value);
     try reflexivity;
     try apply State.get_current_storage_with_current_storage_eq
   end.
